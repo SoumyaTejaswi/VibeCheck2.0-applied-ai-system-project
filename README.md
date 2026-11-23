@@ -1,17 +1,243 @@
-# 🎵 Music Recommender Simulation
+# 🎵 Music Recommender Simulation — AI Taste Concierge
 
-## Project Summary
+## Summary
 
-In this project you will build and explain a small music recommender system.
+This project is a music recommender with two layers: a deterministic, rule-based scoring engine (the original Modules 1–3 project), and an **AI Taste Concierge** sitting in front of it — an agentic workflow that lets a listener describe what they want in plain English, has Claude turn that into the scorer's structured preference format, runs the scorer, and then checks its own results and self-corrects if the match looks weak. It matters because it's a small, honest demonstration of the difference between "an LLM bolted on" and AI that's actually load-bearing: the AI's output here *is* the input to the recommendation logic, the system checks its own work before showing it to anyone, and every failure mode (bad API key, bad LLM output, a request the catalog can't serve) fails safely instead of crashing or silently guessing.
 
-Your goal is to:
+---
 
-- Represent songs and a user "taste profile" as data
-- Design a scoring rule that turns that data into recommendations
-- Evaluate what your system gets right and wrong
-- Reflect on how this mirrors real world AI recommenders
+## Original Project (Modules 1–3)
 
-Replace this paragraph with your own summary of what your version does.
+The original project is **"Music Recommender Simulation."** Its goal was to represent songs and a listener's taste profile as structured data, design a transparent scoring rule that turns that data into ranked recommendations, and reflect on where bias or unfairness could show up in a system like it. The Modules 1–3 version took a structured taste profile (`favorite_genre`, `favorite_mood`, `target_energy`, `likes_acoustic`, plus later extensions for decade/popularity/language/vocals) and scored every song in a small 18-song catalog against it with a fixed, weighted arithmetic formula — no learning, no AI, just addition and sorting, with a plain-language explanation attached to every ranked pick. That scoring engine (`src/recommender.py`) is unchanged in this upgrade; it's still the thing doing the actual ranking.
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    User(["Listener types a free-text request<br/>e.g. 'upbeat songs for a workout'"])
+    Entry["Entry point<br/>CLI: python -m src.main --ask<br/>UI: Streamlit 'Describe what you want' tab"]
+    Vocab["extract_vocab()<br/>real genres / moods / decades / languages<br/>read live from data/songs.csv"]
+
+    User --> Entry --> Vocab
+
+    subgraph AgentLoop["Agentic workflow — src/agent.py: run_concierge()"]
+        direction TB
+        Plan["PLAN<br/>parse_request()<br/>Claude turns the request into a<br/>preference dict, grounded in Vocab"]
+        Act["ACT<br/>recommend_songs()<br/>same deterministic scorer the<br/>manual tab uses"]
+        Check{"CHECK<br/>evaluate()<br/>genre / mood exist in catalog?<br/>top score strong enough?"}
+        Revise["REVISE<br/>revise_request()<br/>Claude is told what was wrong,<br/>returns a corrected guess"]
+        Plan --> Act --> Check
+        Check -->|"issues found, under max_iters"| Revise --> Act
+    end
+
+    Vocab --> Plan
+
+    Output["Output<br/>ranked recommendations + reasons<br/>+ full iteration trace"]
+    Errors["Guardrails<br/>missing API key / unparseable LLM output /<br/>API errors — caught + logged,<br/>shown as a plain message, never a crash"]
+    Logs[("logs/agent.log<br/>every iteration: prefs, score, issues")]
+
+    Check -->|"looks good, or max_iters reached"| Output
+    Plan -. on failure .-> Errors
+    Revise -. on failure .-> Errors
+    AgentLoop -.-> Logs
+
+    Output --> Entry
+    Errors --> Entry
+
+    Listener{{"Human review<br/>listener reads the trace + results<br/>and judges whether the picks are good"}}
+    Manual["Manual tab (no AI)<br/>same recommend_songs(), human-set<br/>sliders/dropdowns — a baseline to<br/>compare the AI path against"]
+    Tests["tests/test_agent.py<br/>FakeClient scripts canned LLM replies<br/>so Plan / Check / Revise are verified<br/>offline, deterministically, every run"]
+
+    Entry --> Listener
+    Entry --> Manual --> Act
+    Tests -. exercises offline, no network .-> AgentLoop
+```
+
+The full diagram source, plus a written breakdown of each component, data flow, and the human/testing checkpoints, lives in [`diagrams/system_diagram.md`](diagrams/system_diagram.md).
+
+In short: a free-text request goes in, gets planned into the recommender's existing preference format (grounded in the catalog's real genre/mood/decade/language values so the agent can't invent something the catalog can't serve), gets scored by the same deterministic engine the manual tab uses, gets checked by the agent against its own self-check, and — if that check finds a problem — gets revised and re-scored before anything is shown to the listener. Everything that happens is logged and surfaced in the trace, so no step is a black box.
+
+---
+
+## Setup Instructions
+
+1. Create a virtual environment (optional but recommended):
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate      # Mac or Linux
+   .venv\Scripts\activate         # Windows
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. (Optional, only needed for the AI Taste Concierge) Get an API key from [console.anthropic.com](https://console.anthropic.com/), then:
+
+   ```bash
+   cp .env.example .env
+   # edit .env and paste in your key
+   ```
+
+4. Run the CLI app:
+
+   ```bash
+   python -m src.main                                     # structured demo profile, no AI, no key needed
+   python -m src.main --ask "upbeat songs for a workout"  # AI Taste Concierge, needs ANTHROPIC_API_KEY
+   ```
+
+5. Or run the Streamlit front end:
+
+   ```bash
+   streamlit run app.py
+   ```
+
+   This opens a browser tab with two tabs: "Describe what you want" (the AI Taste Concierge) and "Set preferences manually" (the original rule-based scorer, no AI). If you don't have a `.env` file set up, the sidebar lets you paste an API key for that session only.
+
+6. Run the test suite:
+
+   ```bash
+   PYTHONPATH=. pytest
+   ```
+
+   This includes `tests/test_agent.py`, which tests the AI Taste Concierge's parsing, validation, self-check, and retry logic against a fake LLM client — no `ANTHROPIC_API_KEY` or network access required, so the suite runs the same way for everyone, with or without a key.
+
+Without a key set, `python -m src.main` (no `--ask`) and the "Set preferences manually" tab still work exactly as before — only the `--ask` / AI tab paths need the key, and they fail with a clear setup message rather than a crash if it's missing.
+
+---
+
+## Sample Interactions
+
+All three runs below are real transcripts from `python -m src.main --ask "..."` against the live Anthropic API (Claude Sonnet 5.5), not fabricated output.
+
+**1. A clean, well-specified request — resolves in one iteration**
+
+```
+Listener request: 'Something upbeat and happy, high energy, not acoustic'
+
+Agent trace
+========================================
+Iteration 1: prefs={'favorite_genre': 'pop', 'favorite_mood': 'happy', 'likes_acoustic': False, 'target_energy': 0.85, 'allow_explicit': True}
+   top score: 5.26
+   looks good, stopping
+
+Top Recommendations
+========================================
+
+1. Sunrise City (5.26 pts)
+   - Matches your favorite genre (pop)
+   - Matches your favorite mood (happy)
+   - Energy closely matches your target
+   - Low acousticness, matching your preference
+
+2. Rooftop Lights (3.97 pts)
+   - Matches your favorite mood (happy)
+   - Energy closely matches your target
+   - Low acousticness, matching your preference
+
+3. Gym Hero (3.79 pts)
+   ...
+```
+
+**2. A request the catalog can't literally serve — tests grounding**
+
+```
+Listener request: "I'm in the mood for some opera, something euphoric and grand"
+
+Agent trace
+========================================
+Iteration 1: prefs={'favorite_genre': 'classical', 'favorite_mood': 'energetic', 'likes_acoustic': True, 'target_energy': 0.8, 'prefers_vocals': True, 'allow_explicit': True}
+   top score: 3.665
+   looks good, stopping
+
+Top Recommendations
+========================================
+
+1. Fractal Bloom (3.67 pts)
+   - Matches your favorite mood (energetic)
+   - Energy closely matches your target
+
+2. Starlit Lullaby (2.86 pts)
+   - Matches your favorite genre (classical)
+   - High acousticness, matching your preference
+   ...
+```
+
+There's no "opera" genre or "euphoric" mood in the catalog, so the agent's `PLAN` step grounded the request to the closest real values (`classical` / `energetic`) instead of inventing a genre that would silently score zero everywhere. The self-check found both values exist in the catalog and the score was strong enough, so it stopped after one iteration.
+
+**3. Nonsense input — tests the guardrail path, not just the happy path**
+
+```
+Listener request: 'asdkjhaskjdh random gibberish text'
+
+Agent trace
+========================================
+Iteration 1: prefs={'favorite_genre': 'pop', 'favorite_mood': 'chill', 'likes_acoustic': False, 'target_energy': 0.5, 'allow_explicit': True}
+   top score: 3.63
+   looks good, stopping
+
+Top Recommendations
+========================================
+
+1. Midnight Coding (3.63 pts)
+   - Matches your favorite mood (chill)
+   - Energy closely matches your target
+   ...
+```
+
+Gibberish input didn't crash the agent or raise an unhandled exception — `parse_request()` still returned valid JSON (a neutral, middle-of-the-road guess), `validate_prefs()` sanitized it, and the scorer ran normally.
+
+A full, guaranteed demonstration of the **self-correction** path specifically (iteration 1 guesses badly, iteration 2 fixes it) is in `tests/test_agent.py::test_run_concierge_self_corrects_on_a_weak_first_guess` — see [Testing Summary](#testing-summary) for why that's where it's reliably shown, rather than in a live transcript.
+
+---
+
+## Design Decisions
+
+- **Agentic workflow over RAG or fine-tuning.** The project already had a working, documented scoring engine (`recommend_songs`). The highest-leverage AI addition was a natural-language front door to that *existing* logic, with a check-and-retry loop — not a parallel retrieval index (there's no unstructured text corpus to retrieve from; the catalog is 18 rows of structured attributes) and not a fine-tuned model (massive overkill, and there's no training data).
+- **Reuse the scorer unchanged.** `agent.py` never reimplements scoring — it calls the exact same `recommend_songs()` the manual tab uses. This keeps one source of truth for "what makes a good match" and means the AI layer can be judged purely on whether it produces good *inputs* to that scorer, not on a second, divergent ranking algorithm.
+- **Ground the LLM in the catalog's real vocabulary.** Every prompt includes the actual genres/moods/decades/languages pulled live from `data/songs.csv`. This was a deliberate trade-off: it constrains the LLM's creativity (it can't recommend-by-vibe outside the catalog's own categories) in exchange for eliminating most hallucinated-preference failures before they happen, rather than catching them after the fact.
+- **Self-check by catalog membership, not by "did the top result mention it."** An early version of `evaluate()` checked whether the *#1 ranked song's* reasons mentioned the stated genre/mood, and that produced a real bug (see Testing Summary) — a song can genuinely match the stated genre and still not be the overall top pick once other preferences are weighed in, since the scorer does partial credit by design. The check now asks the more precise question: does this genre/mood exist in the catalog at all.
+- **Cap iterations, don't loop until perfect.** `max_iters` (default 2) is a hard ceiling. The trade-off is explicit: a request the catalog genuinely can't satisfy well will still get a weak recommendation rather than an endless retry loop — but the listener sees exactly why (the trace), which was judged better than hiding the limitation behind more (costly, still-uncertain) retries.
+- **Validate and clamp, don't reject.** `validate_prefs()` never raises on bad input — out-of-range energy is clamped, unrecognized fields are dropped, missing fields get safe defaults. The trade-off is that a badly-parsed LLM reply degrades recommendation quality instead of stopping the pipeline outright; this was chosen to match the structured/manual path's existing philosophy (documented in the Modules 1–3 experiments below) of failing gracefully rather than failing loudly.
+- **Streamlit for the front end, not a custom web stack.** `streamlit` was already an unused dependency in the starter `requirements.txt`, and it gets a working UI with session state, a sidebar, and two tabs in well under 150 lines — appropriate for a classroom project where the front end isn't the thing being graded on engineering depth.
+- **`.env` for the key, with a Streamlit-sidebar fallback.** Keeps the key out of git (`.gitignore`) while still letting someone demo the Streamlit app without ever touching a terminal or environment variable, at the cost of a slightly less secure "paste a password into a text box" UX for that fallback path — acceptable for a local, single-user classroom demo, not something to ship broadly.
+
+---
+
+## Testing Summary
+
+**Automated, offline (no API key or network required):** 16 tests across `tests/test_recommender.py` and `tests/test_agent.py`, all passing. The agent tests use a `FakeClient` that scripts canned LLM replies, so `parse_request`/`evaluate`/`revise_request`/`run_concierge` are verified deterministically — including the multi-iteration self-correction loop (`test_run_concierge_self_corrects_on_a_weak_first_guess`), validation/clamping of malformed preferences, and retry-then-raise behavior on unparseable LLM output.
+
+**What didn't work the first time — caught by live testing, not by the mocked suite:**
+
+1. **A real crash the tests missed.** `_call_llm_json` assumed `response.content[0]` was always the reply text. Against the real API, Claude Sonnet 5.5 sometimes returns an extended-thinking block *before* the text block, so `content[0].text` raised `AttributeError: 'ThinkingBlock' object has no attribute 'text'` on a live run — even though all 15 mocked tests were green. The mocks were wrong because they encoded an assumption about the response shape that didn't match reality. Fixed by finding the first block where `type == "text"` instead of indexing by position, and added a regression test (`test_parse_request_skips_a_leading_thinking_block`) that fakes exactly that block ordering so this can't silently regress.
+2. **A misleading self-check message.** A live run with `favorite_genre="classical"` reported "No song in the catalog matches genre 'classical'" — which was false; `Starlit Lullaby` is genre `classical` and did match, it just wasn't the #1 overall pick once mood/energy/acoustic preferences were weighed in (the scorer's partial-credit design doing exactly what it's supposed to). The original `evaluate()` only looked at the top result's reasons. Fixed by checking catalog vocabulary membership directly instead, and added `test_evaluate_does_not_flag_a_genre_that_exists_but_misses_the_top_spot` to lock in the corrected behavior.
+
+**What we learned:** a comprehensive mocked test suite proves your *logic* is correct given the response shape you assumed — it can't catch a wrong assumption about what the real API actually returns, or a self-check heuristic that's logically consistent but checking the wrong thing. Both bugs above passed every existing test and only surfaced once real output was read end-to-end. That's also why one specific claim in the Sample Interactions section is deliberately *not* a live transcript: grounding the LLM in the catalog's real vocabulary turned out to work well enough that the live `REVISE` iteration rarely fires in practice (several live attempts at a self-correction demo resolved correctly on the first try) — so the loop's second-iteration behavior is demonstrated reliably in the test suite instead of chased in production traffic.
+
+The original rule-based scorer's own edge-case testing (case sensitivity, out-of-range energy, a genuine scoring tie, etc.) is documented separately below in [Experiments You Tried](#experiments-you-tried), since that testing predates and is independent of the AI layer.
+
+### Reliability Evaluation
+
+I used three of the suggested ways to test the AI layer, not just one: **automated tests** (16/16 passing, offline, listed above), **logging and error handling** (every iteration and every caught failure is written to `logs/agent.log`, detailed in Design Decisions), and **human evaluation** — I read the actual output of 8 real interactions against the live API and judged each one against a specific criterion, logged below in a plain table rather than a screenshot so it can be read without a demo.
+
+**Summary:** 16 out of 16 automated unit tests passed. In human evaluation of 8 real, live interactions, 6 passed on the first try and 2 surfaced genuine bugs (a response-parsing crash on a response shape the mocks didn't anticipate, and a self-check that reported a false "genre doesn't exist" message) — both were fixed and are now locked in by new regression tests, bringing the current pass rate to 8/8. The AI struggled specifically when the real API's response shape didn't match what the mocked tests assumed, and when the self-check reasoned from only the #1 ranked result instead of the whole catalog; accuracy and the self-check's honesty both improved after fixing those two issues.
+
+| Test Input | Evaluation Criteria | Result |
+|---|---|---|
+| `"Something upbeat and happy, high energy, not acoustic"` | Produces relevant, correctly-explained picks, no errors | Pass — Sunrise City (5.26 pts), genre+mood+energy+acoustic all matched, resolved in 1 iteration |
+| `"I'm in the mood for some opera, something euphoric and grand"` | Grounds an out-of-catalog genre/mood (no "opera"/"euphoric" in the catalog) into a real catalog value instead of hallucinating | Pass — grounded to `classical`/`energetic`, both verified present in the catalog by the self-check |
+| `"Play me some hip-hop, something hype"` | Grounds an out-of-catalog genre into a real catalog value | Pass — grounded to `r&b`/`energetic` |
+| `"I only want reggae music, nothing else will do, something relaxed and tropical"` | Grounds an out-of-catalog genre into a real catalog value | Pass — grounded to `latin`/`relaxed` |
+| `"asdkjhaskjdh random gibberish text"` | Handles nonsense input gracefully, no crash | Pass — returned a valid, neutral default profile (`pop`/`chill`); the deterministic scorer still produced a sensible ranked list |
+| `--ask "..."` with no `ANTHROPIC_API_KEY` set | Fails safely with a clear, actionable message, not a stack trace | Pass — printed setup instructions and exited with code 1, no traceback |
+| Live call where the API returned a thinking block before the text block | Code must not crash on a response shape the mocked tests didn't anticipate | **Fail (first run)** — `AttributeError: 'ThinkingBlock' object has no attribute 'text'`; fixed by searching `response.content` for the first block of `type == "text"` instead of indexing `content[0]`; now covered by `test_parse_request_skips_a_leading_thinking_block` |
+| Self-check message for `favorite_genre="classical"` | Self-check only claims a genre "doesn't exist in the catalog" when that's actually true | **Fail (first run)** — claimed classical "doesn't exist" when `Starlit Lullaby` (genre `classical`) matched it at rank #3; fixed by checking catalog vocabulary membership directly instead of only the #1 result's reasons; now covered by `test_evaluate_does_not_flag_a_genre_that_exists_but_misses_the_top_spot` |
 
 ---
 
@@ -94,42 +320,7 @@ Explain your design in plain language.
 
 ---
 
-## Getting Started
-
-### Setup
-
-1. Create a virtual environment (optional but recommended):
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate      # Mac or Linux
-   .venv\Scripts\activate         # Windows
-
-2. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-3. Run the app:
-
-```bash
-python -m src.main
-```
-
-### Running Tests
-
-Run the starter tests with:
-
-```bash
-pytest
-```
-
-You can add more tests in `tests/test_recommender.py`.
-
----
-
-## Sample Recommendation Output
+## Sample Recommendation Output (non-AI baseline)
 
 User profile: favorite_genre=pop, favorite_mood=happy, target_energy=0.8, likes_acoustic=False
 
@@ -323,7 +514,7 @@ Top Recommendations
    - Low acousticness, matching your preference
 ```
 
-`genre_match` and `mood_match` are `0.0` for every song, so the "recommendations" are driven entirely by energy + acoustic fit — effectively ignoring the two preferences the user stated explicitly. The system never flags that it couldn't find any genre/mood match.
+`genre_match` and `mood_match` are `0.0` for every song, so the "recommendations" are driven entirely by energy + acoustic fit — effectively ignoring the two preferences the user stated explicitly. The system never flags that it couldn't find any genre/mood match. (The AI Taste Concierge's `evaluate()` self-check exists specifically to catch this case for the AI-driven path — see Design Decisions above.)
 
 ### 4. Boundary value on the acousticness reason-text threshold
 
@@ -432,4 +623,4 @@ Write 1 to 2 paragraphs here about what you learned:
 
 ## User Profile : 
 
-Taste profile : favorite genre 
+Taste profile : favorite genre
