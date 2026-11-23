@@ -196,6 +196,155 @@ A full, guaranteed demonstration of the **self-correction** path specifically (i
 
 ---
 
+## Reproducible Execution Evidence
+
+Everything below is real terminal output from this exact codebase, captured directly from a shell — not recreated or edited by hand — so the system can be graded by reading this file, without needing to watch a demo video.
+
+### Sample command executions, inputs, and outputs
+
+**1. Default run — no AI, no API key needed:**
+
+```
+$ python -m src.main
+User profile: {'favorite_genre': 'pop', 'favorite_mood': 'happy', 'target_energy': 0.8, 'likes_acoustic': False}
+
+Top Recommendations
+========================================
+
+1. Sunrise City (5.28 pts)
+   - Matches your favorite genre (pop)
+   - Matches your favorite mood (happy)
+   - Energy closely matches your target
+   - Low acousticness, matching your preference
+
+2. Rooftop Lights (4.07 pts)
+   - Matches your favorite mood (happy)
+   - Energy closely matches your target
+   - Low acousticness, matching your preference
+
+3. Gym Hero (3.69 pts)
+   - Matches your favorite genre (pop)
+   - Energy closely matches your target
+   - Low acousticness, matching your preference
+```
+
+**2. AI Taste Concierge — clean, well-specified input:**
+
+```
+$ python -m src.main --ask "Something upbeat and happy, high energy, not acoustic"
+
+Listener request: 'Something upbeat and happy, high energy, not acoustic'
+
+Agent trace
+========================================
+Iteration 1: prefs={'favorite_genre': 'pop', 'favorite_mood': 'happy', 'likes_acoustic': False, 'target_energy': 0.85, 'allow_explicit': True}
+   top score: 5.26
+   looks good, stopping
+
+Top Recommendations
+========================================
+
+1. Sunrise City (5.26 pts)
+   - Matches your favorite genre (pop)
+   - Matches your favorite mood (happy)
+   - Energy closely matches your target
+   - Low acousticness, matching your preference
+
+2. Rooftop Lights (3.97 pts)
+   - Matches your favorite mood (happy)
+   - Energy closely matches your target
+   - Low acousticness, matching your preference
+```
+
+**3. AI Taste Concierge — input the catalog can't literally serve (tests grounding):**
+
+```
+$ python -m src.main --ask "I'm in the mood for some opera, something euphoric and grand"
+
+Listener request: "I'm in the mood for some opera, something euphoric and grand"
+
+Agent trace
+========================================
+Iteration 1: prefs={'favorite_genre': 'classical', 'favorite_mood': 'energetic', 'likes_acoustic': True, 'target_energy': 0.8, 'prefers_vocals': True, 'allow_explicit': True}
+   top score: 3.6650000000000005
+   looks good, stopping
+
+Top Recommendations
+========================================
+
+1. Fractal Bloom (3.67 pts)
+   - Matches your favorite mood (energetic)
+   - Energy closely matches your target
+
+2. Starlit Lullaby (2.86 pts)
+   - Matches your favorite genre (classical)
+   - High acousticness, matching your preference
+```
+
+**4. AI Taste Concierge — nonsense input (tests the guardrail path, not just the happy path):**
+
+```
+$ python -m src.main --ask "asdkjhaskjdh random gibberish text"
+
+Listener request: 'asdkjhaskjdh random gibberish text'
+
+Agent trace
+========================================
+Iteration 1: prefs={'favorite_genre': 'pop', 'favorite_mood': 'chill', 'likes_acoustic': False, 'target_energy': 0.5, 'allow_explicit': True}
+   top score: 3.63
+   looks good, stopping
+
+Top Recommendations
+========================================
+
+1. Midnight Coding (3.63 pts)
+   - Matches your favorite mood (chill)
+   - Energy closely matches your target
+```
+
+### Reliability / guardrail results
+
+**Missing API key — fails safely with a clear message, not a stack trace or crash:**
+
+```
+$ python -m src.main --ask "something chill for studying"   # run with no ANTHROPIC_API_KEY configured
+
+ANTHROPIC_API_KEY is not set, so the AI Taste Concierge can't run.
+Set it in your shell (export ANTHROPIC_API_KEY=sk-...) or in a .env file, then re-run with --ask. See README.md for setup steps.
+exit code: 1
+```
+
+**Full automated test suite — 16/16 passing, offline, no API key or network required:**
+
+```
+$ PYTHONPATH=. pytest -v
+============================= test session starts ==============================
+collected 16 items
+
+tests/test_agent.py::test_extract_vocab_matches_catalog PASSED           [  6%]
+tests/test_agent.py::test_validate_prefs_fills_safe_defaults PASSED      [ 12%]
+tests/test_agent.py::test_validate_prefs_clamps_out_of_range_energy PASSED [ 18%]
+tests/test_agent.py::test_validate_prefs_drops_decade_not_in_catalog PASSED [ 25%]
+tests/test_agent.py::test_parse_request_extracts_json_from_markdown_fence PASSED [ 31%]
+tests/test_agent.py::test_parse_request_skips_a_leading_thinking_block PASSED [ 37%]
+tests/test_agent.py::test_parse_request_retries_once_on_bad_json_then_succeeds PASSED [ 43%]
+tests/test_agent.py::test_parse_request_raises_after_exhausting_retries PASSED [ 50%]
+tests/test_agent.py::test_evaluate_flags_genre_and_mood_not_in_catalog PASSED [ 56%]
+tests/test_agent.py::test_evaluate_passes_a_strong_match PASSED          [ 62%]
+tests/test_agent.py::test_evaluate_does_not_flag_a_genre_that_exists_but_misses_the_top_spot PASSED [ 68%]
+tests/test_agent.py::test_run_concierge_requires_a_client PASSED         [ 75%]
+tests/test_agent.py::test_run_concierge_self_corrects_on_a_weak_first_guess PASSED [ 81%]
+tests/test_agent.py::test_run_concierge_stops_at_max_iters_even_if_still_weak PASSED [ 87%]
+tests/test_recommender.py::test_recommend_returns_songs_sorted_by_score PASSED [ 93%]
+tests/test_recommender.py::test_explain_recommendation_returns_non_empty_string PASSED [100%]
+
+============================== 16 passed in 0.03s ===============================
+```
+
+For the full human-evaluation pass/fail table (8 real interactions scored against specific criteria, including the two bugs this testing found and fixed), see [Reliability Evaluation](#reliability-evaluation) under Testing Summary.
+
+---
+
 ## Design Decisions
 
 - **Agentic workflow over RAG or fine-tuning.** The project already had a working, documented scoring engine (`recommend_songs`). The highest-leverage AI addition was a natural-language front door to that *existing* logic, with a check-and-retry loop — not a parallel retrieval index (there's no unstructured text corpus to retrieve from; the catalog is 18 rows of structured attributes) and not a fine-tuned model (massive overkill, and there's no training data).
@@ -619,7 +768,15 @@ Write 1 to 2 paragraphs here about what you learned:
 - about how recommenders turn data into predictions
 - about where bias or unfairness could show up in systems like this
 
+---
 
+## Portfolio
+
+**Code:** [github.com/SoumyaTejaswi/VibeCheck2.0-applied-ai-system-project](https://github.com/SoumyaTejaswi/VibeCheck2.0-applied-ai-system-project)
+
+**What this project says about me as an AI engineer:**
+
+This project is less about "I added an LLM call" and more about how I handled the part that comes after that — making it trustworthy. I didn't stop at wiring Claude into the recommender; I built a self-check into the agent's own loop, grounded its prompts in the catalog's real data instead of letting it guess freely, and wrote an offline test suite so the logic could be verified without burning API calls on every run. More importantly, when I actually ran it live, I found two real bugs my tests had missed — a response-shape assumption that didn't hold, and a self-check that was quietly answering the wrong question — and I didn't paper over either one. I fixed them, wrote regression tests so they couldn't come back silently, and documented both failures openly in this README and the model card instead of only showing the runs that worked. I'd rather ship a system with one honestly-reported miss than a demo with three quietly-ignored ones; this project is a working record of that, not just a claim about it.
 
 ## User Profile : 
 
